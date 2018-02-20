@@ -21,7 +21,7 @@ class FileSystem:
         numInodes = 1
         blkBlockMap = 1
         blkInodeMap = 2
-        #Im going to have the data blocks grow backwards. and I nodes grow forwards. This allows the inodes to grow forwards and data backwards.
+        #Im going to have the data blocks grow backwards. and I nodes grow forwards
         blkRoot = numBlocks-1
         buff = bytearray(pack('IHHIIII', magicNum, sizeBlocks, numInodes, numBlocks, blkBlockMap, blkInodeMap, blkRoot))+flagBytes
         bd.write_block(0, buff, True)
@@ -49,7 +49,10 @@ class FileSystem:
         bd.write_block(2, iNodeBytes, True)
         bd.close()
 
+#TODO REDO BLOCKMAP STUFF
 
+#Thoughts of what to do: rewrite master block and write out 
+# rewrite each block individually and write out (block map from blockMap object and Inode array from Inode methods
 #TODO: IMPLEMENT WRITE OF DIRTY BIT
 #Thoughts on dirty bit: figure out how to add the bit bad to readin (may just have to manually sove in) then write back
 
@@ -64,29 +67,26 @@ class FileSystem:
         self.bd = BlockDevice.BlockDevice(filename)
         readin = bytearray(self.bd.blocksize)
         self.bd.read_block(0, readin)
+        print(readin)
+        print(self.bd.blocksize)
         #read in all variables from the master block and make them easy to use ints
         (self.magicNum, self.blockSize, self.numInodes, self.numBlocks, self.blockMapNum, self.blockInodeMap, self.blockRoot) = unpack('IHHIIII', readin[0:24])
-#set up flag array
-        self.flagArray = numpy.unpackbits(bytearray(readin[24:25]))
-#check and set dirty bit when mounted
-        if self.flagArray[0] == 1:
-            print('DID NOT UNMOUNT CORRECTLY LAST MOUNT. CHECK YOUR DATA.')
+        #set up flag array
+        self.flagArray = bytearray(readin[24:25])
+        #set dirty bit when mounted
         self.flagArray[0] = 1 
-        #rewrite the block to the masterblock
-        readin[24] = numpy.packbits(self.flagArray)[0]
-        self.bd.write_block(0,readin,True)
-#initialize the blockMap object
+        #initialize the blockMap object
         blockMapArr = bytearray(self.blockSize)
         self.bd.read_block(self.blockMapNum, blockMapArr)
-        blockMapintArr = numpy.unpackbits(blockMapArr)[0:self.numBlocks]
+        blockMapintArr = numpy.unpackbits(blockMapArr[0:self.numBlocks])
+        print(blockMapintArr)
         self.blockMap = blockMap(blockMapintArr, self.numBlocks)
-#initialize the INode array
+        #initialize the INode array
         iNodeBytes = bytearray()
         buff = bytearray(self.blockSize)
         #if there are more I nodes than fit in a single block, they are in a different block. add that to the byte array.
         for i in range(0, math.ceil(self.numInodes/(self.blockSize/128))):
             self.bd.read_block(self.blockInodeMap+i, buff)
-            print(buff)
             iNodeBytes += buff
         self.InodeArray = INode.getInodeList(iNodeBytes, self.numInodes)
 
@@ -96,31 +96,29 @@ class FileSystem:
         #TODO: NEED TO CHANGE DIRTY BLOCK BACK TO FALSE
         #pack the masterblock into bytearray and change the dirty bit back to 0 for false
         self.flagArray[0] = 0
-        masterBuff = bytearray(pack('IHHIIII', self.magicNum, self.blockSize, self.numInodes, self.numBlocks, self.blockMapNum, self.blockInodeMap, self.blockRoot))
-        masterBuff+= bytearray(numpy.packbits(self.flagArray))
-        #NEED TO WRITE MASTER BLOCK LAST, in case unmount fails it is noted
+        flags = numpy.packbits(self.flagArray)
+        masterBuff = bytearray(pack('IHHIIIII', self.magicNum, self.blockSize, self.numInodes, self.numBlocks, self.blockMapNum, self.blockInodeMap, self.blockRoot, flags[0]))
+        print(masterBuff)
         self.bd.write_block(0, masterBuff,True)
         #Master block written, write out block map
         BMbuff = bytearray(self.blockSize)
         BMbuff = self.blockMap.makeBlockMapByte(self.blockSize)
-        self.bd.write_block(1, BMbuff, True)
+        self.bd.write_block(0, BMbuff, True)
         #Writing the iNodes back out.
-        numInodesInBlock= self.blockSize//128
-        iNodeBuff = bytearray()
+        numInodesInBlock= self.blockSize/128
+        iNodeBuff = bytearray(self.blockSize)
         count = 0 
-        for iNode in self.InodeArray:
-            iNodeBuff += iNode.iNodeAsBytes()
+        for iNode in self.INodeArray:
+            iNodeBuff[(count%numInodesInBlock)*128:((count%numInodesInBlock)+1)*128] = iNode.iNodeAsBytes()
             count+=1
-            if count % numInodesInBlock == 0:
-                #tricky math below, do this to get the index of the block for inodes in order
-                self.bd.write_block(self.blockInodeMap + count//numInodesInBlock-1, iNodeBuff, True)
-                iNodeBuff = bytearray()
+            if count % numInodesInBLock == 0:
+                self.bd.write_block(self.blockInodeMap + count//numInodesInBlock, iNodeBuff, True)
         #it finished all the I nodes but didnt write the last block because it is not full of Inodes
         if count% numInodesInBlock != 0:
             badd = bytearray(128 * (numInodesInBlock - count%numInodesInBlock))
             iNodeBuff[((count%numInodesInBlock) +1)*128:] = badd
             self.bd.write_block(self.blockInodeMap +count//numInodesInBlock, iNodeBuff, True)
-        self.bd.close()
+
 
             
 
@@ -209,12 +207,11 @@ class blockMap:
             count+=1
             if count % 8 == 0 and not(count%64 == 0):
                 print('|', end ="")
-            if count >= self.numBlocks:
-                print("")
-                break
             if count%64 == 0:
                 print("")
-            
+            if count > self.numBlocks:
+                break
+
     def alloc_block(self):
         count = 0 
         while self.blockMapArr[count] != 0:
@@ -232,12 +229,16 @@ class blockMap:
             elif resp != 'y':
                 print("I didn't quite get that. Could you please repeat the command?")
                 return
-        self.blockMapArr[num-1] = 0
+        self.blockMapArr[num] = 0
         print('Block Freed')
 
     def makeBlockMapByte(self, sizeBlock):
+        retBytes = bytearray()
         arr = numpy.packbits(self.blockMapArr)
-        return bytearray(arr)
+        for item in arr:
+            retBytes += pack('I', item)
+        print(retBytes)
+        return retBytes
         
 
 
@@ -271,9 +272,9 @@ class INode:
         return retString
 
     def iNodeAsBytes(self):
-        retBytes = bytearray()
-        retBytes = bytearray(pack('IIHHBBH', self.Cdate, self.Mdate, self.InodeNum, self.Perms, self.Flag, self.Level, self.padding))
-        retBytes += self.data
+        retBytes = bytearray(128)
+        retBytes = pack('IIHHBBH', self.Cdate, self.Mdate, sef.InodeNum, self.Perms, self.Flag, self.Level, self.padding)
+        retBytes[16:] = self.data
         return retBytes
 
     def free(self):
