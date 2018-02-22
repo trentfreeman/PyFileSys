@@ -10,8 +10,12 @@ class FileSystem:
     def createFileSystem(filename, numBlocks, sizeBlocks = 1024):
         #This will always create a new file system. 
         #CREATE MASTER BLOCK with settings as given below
-        if sizeBlocks < numBlocks//8 or sizeBlocks < 27:
-            print("Your blocks size is too small to fit either the block map or the master block. Please make the Block size bigger")
+        #check if block Size is a power of two with bit manipulation
+        if not(sizeBlocks != 0 and ((sizeBlocks &(sizeBlocks-1)) == 0)):
+            print("Please make the block size a power of 2")
+            return
+        if sizeBlocks < numBlocks//8 or sizeBlocks < 128:
+            print("Your blocks size is too small to fit either the block map, inodeMap, or the master block. Please make the Block size bigger")
             return
         bd = BlockDevice.BlockDevice(filename, numBlocks, sizeBlocks, True)
         flags = [False] * 8 
@@ -50,8 +54,6 @@ class FileSystem:
         bd.close()
 
 
-#TODO: IMPLEMENT WRITE OF DIRTY BIT
-#Thoughts on dirty bit: figure out how to add the bit bad to readin (may just have to manually sove in) then write back
 
 
 ############## BASE FILE SYSTEM METHODS##########################################################################
@@ -86,20 +88,16 @@ class FileSystem:
         #if there are more I nodes than fit in a single block, they are in a different block. add that to the byte array.
         for i in range(0, math.ceil(self.numInodes/(self.blockSize/128))):
             self.bd.read_block(self.blockInodeMap+i, buff)
-            print(buff)
             iNodeBytes += buff
         self.InodeArray = INode.getInodeList(iNodeBytes, self.numInodes)
 
 
-#TODO: IMPLEMENT UNMOUNT
     def unmount(self):
-        #TODO: NEED TO CHANGE DIRTY BLOCK BACK TO FALSE
         #pack the masterblock into bytearray and change the dirty bit back to 0 for false
         self.flagArray[0] = 0
         masterBuff = bytearray(pack('IHHIIII', self.magicNum, self.blockSize, self.numInodes, self.numBlocks, self.blockMapNum, self.blockInodeMap, self.blockRoot))
         masterBuff+= bytearray(numpy.packbits(self.flagArray))
         #NEED TO WRITE MASTER BLOCK LAST, in case unmount fails it is noted
-        self.bd.write_block(0, masterBuff,True)
         #Master block written, write out block map
         BMbuff = bytearray(self.blockSize)
         BMbuff = self.blockMap.makeBlockMapByte(self.blockSize)
@@ -116,10 +114,9 @@ class FileSystem:
                 self.bd.write_block(self.blockInodeMap + count//numInodesInBlock-1, iNodeBuff, True)
                 iNodeBuff = bytearray()
         #it finished all the I nodes but didnt write the last block because it is not full of Inodes
-        if count% numInodesInBlock != 0:
-            badd = bytearray(128 * (numInodesInBlock - count%numInodesInBlock))
-            iNodeBuff[((count%numInodesInBlock) +1)*128:] = badd
-            self.bd.write_block(self.blockInodeMap +count//numInodesInBlock, iNodeBuff, True)
+        self.bd.write_block(self.blockInodeMap +count//numInodesInBlock, iNodeBuff, True)
+        #write master block last as noted above
+        self.bd.write_block(0, masterBuff,True)
         self.bd.close()
 
             
@@ -136,6 +133,8 @@ class FileSystem:
     def alloc_INode(self, typeLetter):
         #the current Inode number is one less than the number of Inodes because of array syntax
         InodeNum = self.numInodes
+        if self.numInodes%(self.blockSize//128) == 0:
+            self.alloc_Block()
         self.numInodes+=1
         Cdate = 0
         Mdate = 0
@@ -183,7 +182,6 @@ class FileSystem:
 
 
 
-
 ########## BLOCKMAP METHOD CALLS ################################################################################
     def getBlockMap(self):
         self.blockMap.printBlockMap()
@@ -193,6 +191,9 @@ class FileSystem:
 
     def free_Block(self, num):
         self.blockMap.free_block(num)
+
+
+
 
 ########## BLOCK MAP CLASS   ####################################################################################
 class blockMap:
@@ -232,6 +233,9 @@ class blockMap:
             elif resp != 'y':
                 print("I didn't quite get that. Could you please repeat the command?")
                 return
+        elif num > self.numBlocks:
+            print("You cannot free a block that doesen't exist. Please Try again")
+            return
         self.blockMapArr[num-1] = 0
         print('Block Freed')
 
@@ -239,6 +243,10 @@ class blockMap:
         arr = numpy.packbits(self.blockMapArr)
         return bytearray(arr)
         
+
+
+
+
 
 
 ########### INODE CLASS   #########################################################################################
@@ -278,3 +286,27 @@ class INode:
 
     def free(self):
         self.Flag = 244
+
+
+
+
+############ TESTING      #######################################################################################
+def test_Simple():
+    bSize = 1024
+    blocks = 200
+    FileSystem.createFileSystem('testing123', blocks)
+    fs = FileSystem('testing123.dev')
+    assert fs.blockSize == bSize, "didn't initialize block size correctly"
+    assert fs.numBlocks == blocks, "num of blocks not correct"
+    for i in range(0,30):
+        fs.alloc_Block()
+    assert numpy.count_nonzero(fs.blockMap.blockMapArr == 1) == 34, "not allocating block correctly"
+    symbList = [244]
+    numList = [244, 241, 209, 92, 177, 218]
+    for i in range(0,15):
+        symb = ['0', 'f', 'd', 's', 'b', 'D'][i %6]
+        fs.alloc_INode(symb)
+        symbList += [numList[i%6]]
+    for i in range(0,16):
+        assert fs.InodeArray[i].InodeNum == i, 'not initializing Inodes correctly'
+        assert fs.InodeArray[i].Flag == symbList[i], 'not initializing Inode flags correctly'
